@@ -120,6 +120,27 @@ namespace xf
         private:
             std::unique_ptr<std::ifstream> m_sas_ifs;
         };
+
+        xsas_reader::xsas_reader(std::string& file_path)
+        {
+            m_sas_ifs = std::make_unique<std::ifstream>(file_path, std::ios::in | std::ifstream::binary);
+            if (!m_sas_ifs.is_open())
+                throw std::runtime_error(file_path << " does not exsit");
+        }
+
+        axis xsas_reader::read_header()
+        {
+            sas_header_begin header_begin;
+            if (!m_sas_ifs->read(header_begin, sizeof(header_begin)))
+                throw std::runtime_error("read header failed");
+            
+            if (std::memcmp(header_begin.magic_number, sas7bdat_magic_number, sizeof(sas7bdat_magic_number)) != 0)
+                throw std::runtime_error("error");
+            
+
+            
+        }
+
     }
 }
 
