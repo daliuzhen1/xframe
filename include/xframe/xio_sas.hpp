@@ -118,7 +118,14 @@ namespace xf
 
             axis read_header();
         private:
+            inline auto little_endian() {
+                const int test_byte_order = 1;
+                return ((char *)&test_byte_order)[0] != 0;
+            }
+
             std::unique_ptr<std::ifstream> m_sas_ifs;
+            uint64_t m_a1;
+            uint64_t m_a2;
         };
 
         xsas_reader::xsas_reader(std::string& file_path)
@@ -137,10 +144,37 @@ namespace xf
             if (std::memcmp(header_begin.magic_number, sas7bdat_magic_number, sizeof(sas7bdat_magic_number)) != 0)
                 throw std::runtime_error("error");
             
+            auto a1 = 0;
+            if (header_begin.a1 == sas_aligment_offset_4)
+                a1 = 4;
+            auto u64 = 0;
+            if (header_begin.a2 = sas_aligment_offset_4)
+                u64 = 1;
+            auto swap = false;    
+            if (header_begin.endian == sas_endian_big) 
+            {
+                swap = little_endian();
+            } 
+            else if (header_start.endian == sas_endian_little)
+                swap = !little_endian();
+            else 
+                throw std::runtime_error("parse sas error");
 
+            auto file_label = std::string(header_begin.file_label, sizeof(header_begin.file_label));
+            if (!m_sas_ifs.seekg(a1, m_sas_ifs.cur))
+                throw std::runtime_error("parse sas error");
             
-        }
+            auto creation_time = 0.0f;
+            auto modification_time = 0.0f;
+            if (!m_sas_ifs->read(&creation_time, sizeof(creation_time)))
+                throw std::runtime_error("");
+            
+            if (!m_sas_ifs->read(&modification_time, sizeof(modification_time)))
+                throw std::runtime_error("");
 
+            if (!m_sas_ifs.seekg(16, m_sas_ifs.cur))
+                throw std::runtime_error("");
+        }
     }
 }
 
