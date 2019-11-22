@@ -53,7 +53,7 @@ namespace xf
         constexpr uint64_t sas_subheader_pointer_size_64bit = 24;
 
         constexpr uint64_t sas_page_header_size_32bit = 24;
-        constexpr uint64_t sas_subheader_pointer_size_64bit = 40;
+        constexpr uint64_t sas_page_header_size_64bit = 40;
 
         constexpr uint8_t sas_compression_none = 0x00;
         constexpr uint8_t sas_compression_trunc = 0x01;
@@ -116,16 +116,23 @@ namespace xf
             xsas_reader& operator=(const xsas_reader&) = delete;
             xsas_reader& operator=(xsas_reader&&) = delete;
 
-            axis read_header();
+            
         private:
-            inline auto little_endian() {
-                const int test_byte_order = 1;
-                return ((char *)&test_byte_order)[0] != 0;
+            inline bool little_endian()
+            {
+                const int value { 0x01 };
+                const void * address = static_cast<const void *>(&value);
+                const unsigned char * least_significant_address = static_cast<const unsigned char *>(address);
+                return (*least_significant_address == 0x01);
             }
+            template <typename T>
+            inline auto swap_endian(const T& val) -> T;
+            inline void read_header();
 
+            uint64_t m_page_count;
+            uint64_t m_header_size;
+            uint64_t m_page_size;
             std::unique_ptr<std::ifstream> m_sas_ifs;
-            uint64_t m_a1;
-            uint64_t m_a2;
         };
 
         xsas_reader::xsas_reader(std::string& file_path)
@@ -135,21 +142,19 @@ namespace xf
                 throw std::runtime_error(file_path << " does not exsit");
         }
 
-        axis xsas_reader::read_header()
+        void xsas_reader::read_header()
         {
             sas_header_begin header_begin;
             if (!m_sas_ifs->read(header_begin, sizeof(header_begin)))
                 throw std::runtime_error("read header failed");
-            
             if (std::memcmp(header_begin.magic_number, sas7bdat_magic_number, sizeof(sas7bdat_magic_number)) != 0)
                 throw std::runtime_error("error");
-            
             auto a1 = 0;
             if (header_begin.a1 == sas_aligment_offset_4)
                 a1 = 4;
-            auto u64 = 0;
+            auto u64 = false;
             if (header_begin.a2 = sas_aligment_offset_4)
-                u64 = 1;
+                u64 = true;
             auto swap = false;    
             if (header_begin.endian == sas_endian_big) 
             {
@@ -159,21 +164,84 @@ namespace xf
                 swap = !little_endian();
             else 
                 throw std::runtime_error("parse sas error");
-
             auto file_label = std::string(header_begin.file_label, sizeof(header_begin.file_label));
             if (!m_sas_ifs.seekg(a1, m_sas_ifs.cur))
                 throw std::runtime_error("parse sas error");
-            
             auto creation_time = 0.0f;
             auto modification_time = 0.0f;
             if (!m_sas_ifs->read(&creation_time, sizeof(creation_time)))
                 throw std::runtime_error("");
-            
             if (!m_sas_ifs->read(&modification_time, sizeof(modification_time)))
                 throw std::runtime_error("");
-
             if (!m_sas_ifs.seekg(16, m_sas_ifs.cur))
                 throw std::runtime_error("");
+            if (!m_sas_ifs->read(&m_header_size, sizeof(header_size)))
+                throw std::runtime_error("");
+            if (!m_sas_ifs->read(&m_page_size, sizeof(m_page_size)))
+                throw std::runtime_error("");
+            m_header_size = swap ? swap_endian(header_size) : header_size;
+            m_page_size = swap ? swap_endian(m_page_size) : page_size;
+            if (m_header_size < 1024 || m_header_size < 1024)
+                throw std::runtime_error("");
+            if (m_header_size > (1 << 20) || m_page_size > (1 << 24))
+                throw std::runtime_error("");
+            if (u64)
+            {
+                uint64_t r_page_count;
+                if (!m_sas_ifs->read(&r_page_count, sizeof(page_count)))
+                    throw std::runtime_error("");
+                m_page_count = swap ? swap_endian(r_page_count) : r_page_count;
+            }
+            else
+            {
+                uint32_t r_page_count;
+                if (!m_sas_ifs->read(&r_page_count, sizeof(r_page_count)))
+                    throw std::runtime_error("");
+                m_page_count = swap ? swap_endian(r_page_count) : page_count;
+            }
+            if (page_count > (1 << 24))
+                throw std::runtime_error("");
+            if (!m_sas_ifs.seekg(8, m_sas_ifs.cur))
+                throw std::runtime_error("");
+            sas_header_end header_end;
+            if (!m_sas_ifs.read(&header_end, sizeof(header_end)))
+                throw std::runtime_error("");
+            if (!m_sas_ifs.seekg(header_size, m_sas_ifs.begin))
+                throw std::runtime_error("");
+        }
+        template <typename T>
+        inline auto swap_endian(const T &val) -> T
+        {
+            union 
+            {
+                T val;
+                std::array<std::uint8_t, sizeof(T)> raw;
+            } src, dst;
+            src.val = val;
+            std::reverse_copy(src.raw.begin(), src.raw.end(), dst.raw.begin());
+            return dst.val;
+        }
+
+        void read_meta_data() 
+        {
+            for (auto idx = 0; idx < m_page_count; idx++)
+            {
+                if (!m_sas_ifs->seekg(m_header_size + i * m_page_size, m_sas_ifs.begin))
+                    throw std::runtime_error("");
+                
+                uint64_t head_len = 0;
+                if (u64)
+                {
+                    head_len = 16 + 16 + 2;
+                }
+                else 
+                {
+                    head_len = 16 + 2;
+                }
+                // std::string page(head_len, '\0');
+                // if (!m_sas_ifs->read(&page[0], head_len))
+                //     throw std::runtime_error("");
+            }
         }
     }
 }
