@@ -100,12 +100,15 @@ namespace xf
                 return (*least_significant_address == 0x01);
             }
             template <typename T>
-            inline auto swap_endian(const T& val) -> T;
+            inline auto swap_endian(const T&) -> T;
+            template <typename T>
+            inline auto read_data(const std::ifstream& ,bool) -> T;
+
             inline void parse_head();
 
             uint64_t m_page_count {0};
-            uint64_t m_header_size {0};
-            uint64_t m_page_size {0};
+            uint32_t m_header_size {0};
+            uint32_t m_page_size {0};
             bool m_u64 {false};
             bool m_swap {false};
             std::unique_ptr<std::ifstream> m_sas_ifs;
@@ -116,6 +119,30 @@ namespace xf
             m_sas_ifs = std::make_unique<std::ifstream>(file_path, std::ios::in | std::ifstream::binary);
             if (!m_sas_ifs.is_open())
                 throw std::runtime_error(file_path << " does not exsit");
+        }
+
+        template <typename T>
+        inline auto swap_endian(const T &val) -> T
+        {
+            union 
+            {
+                T val;
+                std::array<std::uint8_t, sizeof(T)> raw;
+            } src, dst;
+            src.val = val;
+            std::reverse_copy(src.raw.begin(), src.raw.end(), dst.raw.begin());
+            return dst.val;
+        }
+
+        template <typename T>
+        inline auto read_sas_data(const std::ifstream& ifs ,bool swap) -> T
+        {
+            T data;
+            if (!ifs.read(&data, sizeof(data)))
+                throw std::runtime_error("");
+            if (swap)
+                data = swap_endian(data);
+            return data;
         }
 
         void xsas7bdat_reader::parse_head()
@@ -158,195 +185,174 @@ namespace xf
                 m_swap = !little_endian();
             else 
                 throw std::runtime_error("parse sas error");
-            auto file_label = std::string(header_begin.file_label, sizeof(header_begin.file_label));
+
             if (!m_sas_ifs.seekg(a1 + sizeof(double) * 2 + 16, m_sas_ifs.cur))
                 throw std::runtime_error("parse sas error");
-            if (!m_sas_ifs->read(&m_header_size, sizeof(header_size)))
-                throw std::runtime_error("");
-            if (!m_sas_ifs->read(&m_page_size, sizeof(m_page_size)))
-                throw std::runtime_error("");
-            m_header_size = m_swap ? swap_endian(header_size) : header_size;
-            m_page_size = m_swap ? swap_endian(m_page_size) : page_size;
-            if (m_header_size < 1024 || m_header_size < 1024)
+
+            m_header_size = read_data(*m_sas_ifs, m_swap);
+            m_page_size = read_data(*m_sas_ifs, m_swap);
+            if (m_header_size < 1024 || m_page_size < 1024)
                 throw std::runtime_error("");
             if (m_header_size > (1 << 20) || m_page_size > (1 << 24))
                 throw std::runtime_error("");
+
             if (m_u64)
             {
-                uint64_t r_page_count;
-                if (!m_sas_ifs->read(&m_page_count, sizeof(page_count)))
-                    throw std::runtime_error("");
-                m_page_count = m_swap ? swap_endian(m_page_count) : r_page_count;
+                m_page_count = read_data(*m_sas_ifs, m_swap);
             }
             else
             {
-                uint32_t r_page_count;
-                if (!m_sas_ifs->read(&r_page_count, sizeof(r_page_count)))
-                    throw std::runtime_error("");
-                m_page_count = m_swap ? swap_endian(r_page_count) : page_count;
+                uint32_t r_page_count = read_data(*m_sas_ifs, m_swap);
+                m_page_count = r_page_count;
             }
             if (m_page_count > (1 << 24))
                 throw std::runtime_error("");
         }
 
-        template <typename T>
-        inline auto swap_endian(const T &val) -> T
+        std::tuple<uint64_t, uint64_t, uint8_t> xsas7bdat_reader::parse_subheader_pointer()
         {
-            union 
+            auto offset_to_subhead = 0;
+            auto length = 0;
+            auto compression = 0;
+            if (m_u64) 
             {
-                T val;
-                std::array<std::uint8_t, sizeof(T)> raw;
-            } src, dst;
-            src.val = val;
-            std::reverse_copy(src.raw.begin(), src.raw.end(), dst.raw.begin());
-            return dst.val;
+                uint64_t r_offset_to_subhead = read_data(*m_sas_ifs, m_swap);
+                uint64_t r_length = read_data(*m_sas_ifs, m_swap);
+                uint8_t r_compression = read_data(*m_sas_ifs, m_swap);
+                if (!m_sas_ifs->seekg(7, m_sas_ifs.cur))
+                    throw std::runtime_error("");
+                
+                offset_to_subhead = r_offset_to_subhead;
+                length = r_length;
+                compression = r_compression;
+            }
+            else 
+            {
+                uint32_t r_offset_to_subhead = read_data(*m_sas_ifs, m_swap);
+                uint32_t r_length = read_data(*m_sas_ifs, m_swap);
+                uint8_t r_compression = read_data(*m_sas_ifs, m_swap);
+                if (!m_sas_ifs->seekg(3, m_sas_ifs.cur))
+                    throw std::runtime_error("");
+
+                offset_to_subhead = r_offset_to_subhead;
+                length = r_length;
+                compression = r_compression;
+            }
+            return std::make_tuple(offset_to_subhead, length, compression);
         }
 
-        void xsas7bdat_reader::parse_page() 
+        void xsas7bdat_reader::parse_page_subheader(uint64_t page_offset)
         {
-            for (auto idx = 0; idx < m_page_count; idx++)
+            uint16_t subheader_count = read_data(*m_sas_ifs, m_swap);
+            if (!m_sas_ifs->seekg(mystery_size, m_sas_ifs.cur))
+                throw std::runtime_error("");
+
+            auto subheader_pointer_size = 0;
+            auto page_header_size = 0;
+            auto subheader_signature_size = 0;
+            if (m_u64)
             {
-                if (!m_sas_ifs->seekg(m_header_size + i * m_page_size, m_sas_ifs.begin))
-                    throw std::runtime_error("");
-                
-                auto mystery_size = 0;
-                if (m_u64)
-                    mystery_size = 28;
-                else
-                    mystery_size = 12;
+                subheader_pointer_size = sas_subheader_pointer_size_64bit;
+                page_header_size = sas_page_header_size_64bit;
+                subheader_signature_size = 8;
+            }
+            else
+            {
+                subheader_pointer_size = sas_subheader_pointer_size_32bit;
+                page_header_size = sas_page_header_size_32bit;
+                subheader_signature_size = 4;
+            }
+            for (auto idx = 0; idx < subheader_count; idx++)
+            {
+                [auto offset_to_subhead, auto length, auto compression] = parse_subheader_pointer();
 
-                if (!m_sas_ifs->seekg(4 + mystery_size, m_sas_ifs.cur))
-                    throw std::runtime_error("");
-                
-                uint16_t page_type;
-                if (!m_sas_ifs->read(&page_type, sizeof(page_type)))
-                    throw std::runtime_error("");
-                if (m_swap)
-                    page_type = swap_endian(page_type);
-                if ((page_type & SAS_PAGE_TYPE_MASK) == SAS_PAGE_TYPE_DATA)
-                    break;
-                if ((page_type & SAS_PAGE_TYPE_COMP))
-                    continue;
-            
-                if (!m_sas_ifs->seekg(2, m_sas_ifs.cur))
-                    throw std::runtime_error("");
-                
-                uint16_t subheader_count;
-                if (!m_sas_ifs->read(&subheader_count, sizeof(subheader_count)))
-                    throw std::runtime_error("");
-                if (m_swap)
-                    subheader_count = swap_endian(subheader_count);
-
-                if (!m_sas_ifs->seekg(2, m_sas_ifs.cur))
-                    throw std::runtime_error("");
-
-                auto subheader_pointer_size = 0;
-                auto page_header_size = 0;
-                auto subheader_signature_size = 0;
-                if (m_u64)
+                if (length > 0 && compression != sas_compression_trunc)
                 {
-                    subheader_pointer_size = sas_subheader_pointer_size_64bit;
-                    page_header_size = sas_page_header_size_64bit;
-                    subheader_signature_size = 8;
-                }
-                else
-                {
-                    subheader_pointer_size = sas_subheader_pointer_size_32bit;
-                    page_header_size = sas_page_header_size_32bit;
-                    subheader_signature_size = 4;
-                }
-                for (auto idx = 0; idx < subheader_count; idx++)
-                {
-                    auto length = 0;
-                    auto compression = 0;
-                    auto offset_to_subhead = 0;
-                    if (m_u64) 
+                    if (offset_to_subhead > m_page_size)
+                        throw std::runtime_error("");
+                    else if (length > m_page_size)
+                        throw std::runtime_error("");
+                    else if (offset_to_subhead + length > m_page_size)
+                        throw std::runtime_error("");
+                    else if (offset_to_subhead < m_header_size + page_header_size + subheader_pointer_size * subheader_count)
+                        throw std::runtime_error("");
+                    else if (compression == sas_compression_none)
                     {
-                    #pragma pack(push, 1)
-                        struct sas_sub_header
+                        if (length < subheader_signature_size)
+                            throw std::runtime_error("");
+                        else if (offset_to_subhead + subheader_signature_size > m_page_size)
+                            throw std::runtime_error("");
+                        else
                         {
-                            uint64_t offset_to_subhead;
-                            uint64_t length;
-                            uint8_t compression;
-                            uint8_t type;
-                            uint8_t[6] zeros; 
-                        };
-                    #pragma pack(pop)
-                        sas_sub_header sub_header;
-                        if (!m_sas_ifs->read(&sub_header, sizeof(sub_header)))
-                            throw std::runtime_error("");
-                        length = m_swap ? swap_endian(sub_header.length) : sub_header.length;
-                        offset_to_subhead = m_swap ? swap_endian(sub_header.offset_to_subhead) : sub_header.offset_to_subhead;
-                        compression = sub_header.compression;
-                    }
-                    else 
-                    {
-                    #pragma pack(push, 1)
-                        struct sas_sub_header
-                        {
-                            uint32_t offset_to_subhead;
-                            uint32_t length;
-                            uint8_t compression;
-                            uint8_t type;
-                            uint8_t[2] zeros; 
-                        };
-                    #pragma pack(pop)
-                        sas_sub_header sub_header;
-                        if (!m_sas_ifs->read(&sub_header, sizeof(sub_header)))
-                            throw std::runtime_error("");
-                        length = m_swap ? swap_endian(sub_header.length) : sub_header.length;
-                        offset_to_subhead = m_swap ? swap_endian(sub_header.offset_to_subhead) : sub_header.offset_to_subhead;
-                        compression = sub_header.compression;
-                    }
-
-                    if (length > 0 && compression != sas_compression_trunc)
-                    {
-                        if (offset_to_subhead > m_page_size)
-                            throw std::runtime_error("");
-                        else if (length > m_page_size)
-                            throw std::runtime_error("");
-                        else if (offset_to_subhead + length > m_page_size)
-                            throw std::runtime_error("");
-                        else if (offset_to_subhead < m_header_size + page_header_size + subheader_pointer_size * subheader_count)
-                            throw std::runtime_error("");
-                        else if (compression == sas_compression_none)
-                        {
-                            if (length < subheader_signature_size)
+                            if (!m_sas_ifs->seekg(page_offset + offset_to_subhead, m_sas_ifs.begin))
                                 throw std::runtime_error("");
-                            else if (offset_to_subhead + subheader_signature_size > m_page_size)
-                                throw std::runtime_error("");
-                            else
+                            int32_t signature = read_data(*m_sas_ifs, m_swap);
+                            if (!little_endian() && signature == -1 && subheader_signature_size == 8 )
                             {
-                                if (!m_sas_ifs->seekg(m_header_size + i * m_page_size + offset_to_subhead, m_sas_ifs.begin))
+                                signature = read_data(*m_sas_ifs, m_swap);
+                            }
+                            if (signature == sas_subheader_signature_column_text)
+                            {
+                                if (length < 2 + subheader_signature_size)
                                     throw std::runtime_error("");
-                                int32_t signature = 0;
-                                if (!m_sas_ifs->read(&signature, sizeof(int32_t)))
-                                    throw std::runtime_error("");
-                                signature = m_swap ? swap_endian(signature) : signature;
-
-
-                                if (!little_endian() && signature == -1 && subheader_signature_size == 8 )
+                                else if (signature == sas_subheader_signature_row_size)
+                                    parse_row_size_subheader();
+                                else if (signature == sas7bdat_parse_column_size_subheader)
+                                    parse_column_size_subheader();
+                                else if (signature == sas_subheader_signature_counts)
                                 {
-                                    if (!m_sas_ifs->read(&signature, sizeof(int32_t)))
-                                        throw std::runtime_error("");
-                                    signature = m_swap ? swap_endian(signature) : signature;
+                                    // do nothing
                                 }
-                                if (signature == sas_subheader_signature_column_text)
+                                else if (signature == sas_subheader_signature_column_text)
+                                    parse_column_text_subheader();
+                                else if (signature == sas_subheader_signature_column_name)
+                                    parse_column_name_subheader();
+                                else if (signature == sas_subheader_signature_column_attrs)
+                                    parse_column_attributes_subheader();
+                                else if (signature == sas_subheader_signature_column_format)
+                                    parse_column_format_subheader();
+                                else if (signature == sas_subheader_signature_column_list)
                                 {
-                                    sas7bdat_parse_subheader
+                                    // do nothing
+                                }
+                                else if ((signature & sas_subheader_signature_column_mask) == sas_subheader_signature_column_mask)
+                                {
+                                    // do nothing
+                                }
+                                else 
+                                {
+                                    throw std::runtime_error("");
                                 }
                             }
                         }
-                        else if (compression != sas_compression_row) 
-                        {
+                    }
+                    else if (compression != sas_compression_row) 
+                    {
                             throw std::runtime_error("");
-                        }
-                        else
-                        {
-                            // do nothing
-                        }
+                    }
+                    else
+                    {
+                        // do nothing
                     }
                 }
+            }
+        }
+
+        void xsas7bdat_reader::parse_row_size_subheader(uint64_t length)
+        {
+            if (length < (m_u64 ? 128 : 64))
+                throw std::runtime_error("");
+
+            if (m_u64)
+            {
+                auto mystery_size = 32;
+                if (!m_sas_ifs->seekg(mystery_size, m_sas_ifs.cur))
+                    throw std::runtime_error("");
+                uint64_t row_length = read_data(*m_sas_ifs, m_swap);
+                uint64_t total_row_count = read_data(*m_sas_ifs, m_swap);
+                if (!m_sas_ifs->seekg(mystery_size, m_sas_ifs.cur))
+                    throw std::runtime_error("");
+                uint64_t page_row_count = read_data(*m_sas_ifs, m_swap);
             }
         }
     }
