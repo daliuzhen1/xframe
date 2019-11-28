@@ -315,7 +315,7 @@ namespace xf
             return std::make_tuple(offset_to_subhead, length, compression, subheader_type);
         }
 
-        void xsas7bdat_reader::parse_subheader(std::string::iterator& it, )
+        void xsas7bdat_reader::parse_subheader(std::string::iterator& it, uint64_t length)
         {
             auto subheader_signature_size = m_u64 ? 8 : 4;
             auto signature = read_sas_data<int32_t>(it, m_swap);
@@ -323,25 +323,93 @@ namespace xf
                 signature = read_sas_data<int32_t>(it, m_swap);
             if (signature != sas_subheader_signature_column_text)
                 return;
+            if (length < 2 + subheader_signature_size)
+                throw std::runtime_error("");
+            if (signature == sas_subheader_signature_row_size)
+                parse_row_size_subheader();
+            else if (signature == sas_subheader_signature_column_size)
+                parse_column_size_subheader();
+            else if (signature == sas_subheader_signature_counts)
+            {
+                // do nothing
+            }
+            else if (signature == sas_subheader_signature_column_text)
+                parse_column_text_subheader();
+            else if (signature == sas_subheader_signature_column_name)
+                parse_column_name_subheader();
+            else if (signature == sas_subheader_signature_column_attrs)
+                parse_column_attrs_subheader();
+            else if (signature == sas_subheader_signature_column_format)
+                parse_column_format_subheader();
+            else if (signature == sas_subheader_signature_column_list)
+            {
+
+            }
+            else if ((signature & sas_subheader_signature_column_mask) == sas_subheader_signature_column_mask)
+            {
+
+            }
+            else
+                throw std::runtime_error("");
         }
 
-        void xsas7bdat_reader::parse_row_size_subheader(uint64_t length)
+        void xsas7bdat_reader::parse_row_size_subheader(std::string::iterator& it, uint64_t length)
         {
             if (length < (m_u64 ? 128 : 64))
                 throw std::runtime_error("");
 
             if (m_u64)
             {
-                auto mystery_size = 32;
-                if (!m_sas_ifs->seekg(mystery_size, m_sas_ifs.cur))
-                    throw std::runtime_error("");
-                uint64_t row_length = read_data(*m_sas_ifs, m_swap);
-                uint64_t total_row_count = read_data(*m_sas_ifs, m_swap);
-                if (!m_sas_ifs->seekg(mystery_size, m_sas_ifs.cur))
-                    throw std::runtime_error("");
-                uint64_t page_row_count = read_data(*m_sas_ifs, m_swap);
+                seekg(it, 40);
+                auto row_length = read_sas_data<uint64_t>(it, m_swap);
+                auto total_row_count = read_sas_data<uint64_t>(it, m_swap);
+                auto page_row_count = read_sas_data<uint64_t>(it, m_swap);
+            }
+            else
+            {
+                seekg(it, 20);
+                auto row_length = read_sas_data<uint32_t>(it, m_swap);
+                auto total_row_count = read_sas_data<uint32_t>(it, m_swap);
+                auto page_row_count = read_sas_data<uint32_t>(it, m_swap);
+            }
+            auto row_offset = 0;
+            auto total_row_count_after_skipping = total_row_count;
+            if (total_row_count > row_offset)
+            {
+                total_row_count_after_skipping -= ctx->row_offset;
+            }
+            else
+            {
+                total_row_count_after_skipping = 0;
+                row_offset = total_row_count;
             }
         }
+
+        void xsas7bdat_reader::parse_column_size_subheader(std::string::iterator& it)
+        {
+            auto column_count = m_u64 ? read_sas_data<uint64_t>(it, m_swap) : read_sas_data<uint32_t>(it, m_swap);
+        }
+
+        void xsas7bdat_reader::parse_column_text_subheader(std::string::iterator& it)
+        {
+            auto signature_len = m_u64 ? 8 : 4;
+            auto remainder = read_sas_data<uint64_t>(it, m_swap);
+        }
+
+        void xsas7bdat_reader::parse_column_name_subheader(std::string::iterator& it)
+        {
+        }
+
+        void xsas7bdat_reader::parse_column_attrs_subheader()
+        {
+        }
+
+        void xsas7bdat_reader::parse_column_format_subheader()
+        {
+
+        }
+
+
     }
 }
 
